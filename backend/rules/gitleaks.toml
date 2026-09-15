@@ -1,0 +1,9 @@
+title = "CyberGuard secret scanning"
+[extend]
+useDefault = true
+[[rules]]
+id = "assigned-api-credential"
+description = "Credential-like value assigned to an API key variable"
+regex = '''(?i)(?:api[_-]?key|access[_-]?token)\s*[=:]\s*["']?([A-Za-z0-9_\-]{20,})'''
+secretGroup = 1
+keywords = ["api_key", "apikey", "access_token"]

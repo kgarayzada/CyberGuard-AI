@@ -1,37 +1,21 @@
-import {chromium} from '../frontend/node_modules/playwright-core/index.mjs';
+﻿import {chromium} from '../frontend/node_modules/playwright-core/index.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import {fileURLToPath} from 'node:url';
-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const chrome=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(p=>fs.existsSync(p));
-if(!chrome)throw new Error('No installed Chrome or Edge browser available. Use manual visual QA.');
-const screenshots=process.argv.includes('--screenshots');
-const output=path.join(root,'docs','screenshots');
-const context=await chromium.launchPersistentContext(path.join(root,'.tooling','browser-profile'),{executablePath:chrome,headless:true,viewport:{width:1440,height:900},deviceScaleFactor:1,args:['--disable-background-networking','--disable-component-update','--no-first-run']});
-const page=context.pages()[0]??await context.newPage();
-const errors=[];const external=[];const checks=[];
-page.on('pageerror',e=>errors.push(e.message));
-page.on('request',r=>{if(!r.url().startsWith('http://127.0.0.1:5173')&&!r.url().startsWith('data:'))external.push(r.url())});
-async function settle(){await page.waitForLoadState('networkidle');await page.evaluate(()=>document.fonts.ready);}
-async function visit(route){await page.goto('http://127.0.0.1:5173/#'+route);await settle();await page.locator('main h1').first().waitFor();}
-async function clean(label){await settle();const text=await page.locator('main').innerText();assert(!/\bundefined\b|\bNaN\b|Traceback|500 Internal Server Error/.test(text),label+': unexpected visible errors');assert(!text.includes('Preparing your security workspace'),label+': stuck loading');const overflow=await page.evaluate(()=>({width:innerWidth,document:document.documentElement.scrollWidth}));assert(overflow.document<=overflow.width+1,`${label}: horizontal overflow ${JSON.stringify(overflow)}`);checks.push(label);}
-async function shot(name){await settle();await page.screenshot({path:path.join(output,name),fullPage:false,animations:'disabled'});}
+const root=process.cwd();
+const browser=await chromium.launch({executablePath:'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',headless:true,args:['--no-first-run']});
+const page=await browser.newPage({viewport:{width:1440,height:900}});const errors=[];
+page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error')errors.push(m.text())});
 try{
- await visit('overview');await clean('Dashboard at 1440×900');assert.equal(await page.locator('.score-ring strong').innerText(),'58');assert.equal(await page.locator('.recharts-surface').count(),2);
- await page.locator('nav a[href="#assets"]').click();await page.getByRole('button',{name:/FinTrust Customer Portal Active/i}).click();await clean('Asset profile and navigation');assert.match(await page.locator('main').innerText(),/Digital Banking Team/);
- await page.locator('nav a[href="#scans"]').click();await clean('Scan history');const rows=await page.locator('tbody tr').count();
- await page.getByRole('button',{name:'START SECURITY SCAN',exact:true}).click();await page.locator('.scan-drawer').waitFor();await page.getByText('Assessment complete',{exact:true}).waitFor({timeout:12000});await page.getByRole('button',{name:'View assessment results'}).click();await clean('Simulated scan and completed results');assert.match(await page.locator('main').innerText(),/Assessment finding snapshot/);
- await visit('scans');assert.equal(await page.locator('tbody tr').count(),rows+1);
- await page.locator('nav a[href="#findings"]').click();await page.getByLabel('Search findings').fill('credential');assert.equal(await page.locator('tbody tr').count(),1);await page.getByLabel('Search findings').fill('');await page.getByLabel('Severity filter').selectOption('HIGH');assert.equal(await page.locator('tbody tr').count(),3);await page.getByLabel('Severity filter').selectOption('ALL');await page.getByLabel('Status filter').selectOption('RESOLVED');assert.equal(await page.locator('tbody tr').count(),1);await page.getByLabel('Status filter').selectOption('ALL');await page.getByLabel('Category filter').selectOption('Session Security');assert.equal(await page.locator('tbody tr').count(),1);await page.getByLabel('Category filter').selectOption('ALL');await page.getByLabel('Search findings').fill('does-not-exist');await page.getByText('No matching findings').waitFor();await page.getByLabel('Search findings').fill('');await clean('Finding search, filters and empty state');
- await page.getByText('Exposed API Credential in Public Source Map',{exact:true}).click();await page.locator('.context-score').waitFor();await clean('Critical finding detail');assert.match(await page.locator('pre').innerText(),/CG_DEMO_NOT_REAL_2026/);assert.match(await page.locator('.context-score').innerText(),/96/);assert.equal(await page.locator('.analysis-sections h3').count(),6);await page.getByLabel('Current disposition').selectOption('ACCEPTED');await page.waitForFunction(()=>document.querySelector('.detail-title')?.textContent.includes('ACCEPTED'));await page.getByLabel('Current disposition').selectOption('OPEN');await page.waitForFunction(()=>document.querySelector('.detail-title')?.textContent.includes('OPEN'));
- await visit('paths');await clean('Both attack path graphs');assert.equal(await page.locator('.path-node').count(),7);assert.equal(await page.locator('.path-card').count(),2);
- await visit('analyst');await clean('AI Analyst welcome');for(const button of await page.locator('.analyst-prompts>button').all()){await button.click();await page.locator('.answer-foot').waitFor();assert(await page.locator('.answer-section').count()>0);await clean('Analyst: '+await button.innerText());}
- await visit('reports');await clean('Reports landing');await page.getByRole('button',{name:'VIEW SECURITY REPORT',exact:true}).click();await page.locator('.security-report').waitFor();await clean('Current assessment report');assert.equal(await page.locator('.report-finding').count(),11);await page.getByRole('button',{name:'GENERATE REPORT',exact:true}).click();await page.getByText('Security report generated and saved locally.').waitFor();await page.locator('.saved-report').first().waitFor();await page.locator('.saved-report').first().click();await clean('Generated and saved report');
- for(const viewport of [{width:1366,height:768},{width:390,height:844}]){await page.setViewportSize(viewport);for(const route of ['overview','assets','scans','findings','findings/CG-F001','paths','analyst','reports']){await visit(route);await clean(`${route} at ${viewport.width}×${viewport.height}`)}}
- await page.setViewportSize({width:1440,height:900});await page.route('**/api/state',route=>route.abort());await page.goto('http://127.0.0.1:5173');await page.getByRole('heading',{name:'Your workspace is waiting.'}).waitFor();await page.unroute('**/api/state');await page.getByRole('button',{name:'Reconnect',exact:true}).click();await page.locator('.score-ring').waitFor();await clean('Graceful connection failure and recovery');
- assert.deepEqual(errors,[],'Browser runtime errors');assert.deepEqual(external,[],'Unexpected external application requests');
- console.log(`PASS: ${checks.length} browser checks; no runtime errors, external requests or horizontal page overflow.`);
- if(screenshots){fs.mkdirSync(output,{recursive:true});await visit('overview');await shot('01-dashboard.png');await visit('scans');await shot('02-scan-completed.png');await visit('findings/CG-F001');await shot('03-critical-finding.png');await visit('analyst');await page.locator('.analyst-prompts>button').first().click();await page.locator('.answer-foot').waitFor();await shot('04-ai-analysis.png');await visit('paths');await shot('05-attack-path.png');await visit('reports');await page.getByRole('button',{name:'VIEW SECURITY REPORT',exact:true}).click();await page.locator('.security-report').waitFor();await page.locator('.security-report').scrollIntoViewIfNeeded();await shot('06-security-report.png');console.log('PASS: Six presentation screenshots saved to docs/screenshots/.');}
- fs.writeFileSync(path.join(root,'docs','qa-results.json'),JSON.stringify({verifiedAt:new Date().toISOString(),checks,errors,externalRequests:external,screenshots},null,2));
-}catch(error){fs.mkdirSync(path.join(root,'.tooling'),{recursive:true});await page.screenshot({path:path.join(root,'.tooling','qa-failure.png'),fullPage:true});console.error(error);process.exitCode=1;}finally{await context.close()}
+ await page.goto('http://127.0.0.1:5173');await page.getByRole('heading',{name:'Your security posture. At a glance.'}).waitFor();
+ const a=await (await page.request.get('http://127.0.0.1:5173/api/assessments')).json();
+ const demo=a.find(x=>x.project_name==='CyberGuard Vulnerable Demo');
+ for(const width of [1440,1366,1024,390]){
+  await page.setViewportSize({width,height:900});
+  const routes=['overview','upload','assessments','findings','reports'];
+  if(demo){const detail=await (await page.request.get('http://127.0.0.1:5173/api/assessments/'+demo.id)).json();routes.push('assessments/'+demo.id,'reports/'+demo.id);if(detail.findings.length)routes.push('findings/'+detail.findings[0].id)}
+  for(const route of routes){await page.goto('http://127.0.0.1:5173/#'+route);await page.waitForTimeout(500);assert.equal(await page.locator('body').evaluate(el=>el.scrollWidth>innerWidth+2),false,route+' overflow '+width);}
+ }
+ await page.setViewportSize({width:1440,height:900});await page.goto('http://127.0.0.1:5173/#upload');await page.getByLabel('Source ZIP').setInputFiles(path.join(root,'demo/cyberguard-vulnerable-demo.zip'));await page.locator('input[name=project_name]').fill('Browser upload QA');await page.locator('input[name=authorized]').check();await page.getByRole('button',{name:'START ASSESSMENT',exact:true}).click();await page.waitForURL(/assessments\//);await page.getByRole('button',{name:'VIEW SECURITY REPORT'}).waitFor({timeout:240000});await page.getByRole('button',{name:'VIEW SECURITY REPORT'}).click();await page.getByRole('heading',{name:'Executive summary'}).waitFor();
+ assert.deepEqual(errors,[]);fs.mkdirSync('.tooling/qa',{recursive:true});await page.screenshot({path:'.tooling/qa/report.png',fullPage:true});console.log('PASS: browser upload, scanner completion, report; responsive routes at 1440/1366/1024/390; zero console/runtime errors.');
+}finally{await browser.close()}

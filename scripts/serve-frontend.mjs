@@ -1,4 +1,4 @@
-// Small static presentation server. All browser/API traffic remains on loopback.
+﻿// Small static presentation server. All browser/API traffic remains on loopback.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,7 +9,7 @@ const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=u
 const server=http.createServer((req,res)=>{
   if(req.url==='/__cyberguard') {res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({service:'cyberguard-frontend',workspace:root}));return;}
   if(req.url?.startsWith('/api/')) {
-    const proxy=http.request({hostname:'127.0.0.1',port:8000,path:req.url,method:req.method,headers:{'content-type':'application/json'},timeout:15000},upstream=>{res.writeHead(upstream.statusCode??502,{'Content-Type':'application/json','Cache-Control':'no-store'});upstream.pipe(res);});
+    const proxy=http.request({hostname:'127.0.0.1',port:8000,path:req.url,method:req.method,headers:{'content-type':req.headers['content-type']||'application/json',...(req.headers.origin?{origin:req.headers.origin}:{}),...(req.headers['content-length']?{'content-length':req.headers['content-length']}:{})},timeout:120000},upstream=>{res.writeHead(upstream.statusCode??502,{'Content-Type':'application/json','Cache-Control':'no-store'});upstream.pipe(res);});
     proxy.on('timeout',()=>proxy.destroy());
     proxy.on('error',()=>{if(!res.headersSent)res.writeHead(503,{'Content-Type':'application/json'});res.end(JSON.stringify({detail:'The local assessment engine is reconnecting. Please retry.'}));});
     req.pipe(proxy);return;
@@ -24,3 +24,4 @@ const server=http.createServer((req,res)=>{
 });
 server.listen(5173,'127.0.0.1',()=>console.log('CyberGuard AI frontend: http://127.0.0.1:5173'));
 server.on('error',error=>{console.error('Frontend could not start:',error.message);process.exitCode=1;});
+

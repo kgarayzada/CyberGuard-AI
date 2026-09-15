@@ -7,3 +7,7 @@ data/*.db*
 data/*.json
 data/*.log
 .tooling/
+data/workspaces/
+data/uploads/
+**/__pycache__/
+docs/qa-results.json

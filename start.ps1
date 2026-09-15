@@ -1,8 +1,8 @@
-param([switch]$NoBrowser)
+﻿param([switch]$NoBrowser)
 . (Join-Path $PSScriptRoot 'scripts\common.ps1')
 Push-Location -LiteralPath $ProjectRoot
 try {
-    Write-Host "`nCYBERGUARD AI | Local demonstration" -ForegroundColor Cyan
+    Write-Host "`nCYBERGUARD AI | Static source-code assessment" -ForegroundColor Cyan
     $backendReady = Test-ProjectService 'http://127.0.0.1:8000/api/health' 'cyberguard-ai'
     $frontendReady = Test-ProjectService 'http://127.0.0.1:5173/__cyberguard' 'cyberguard-frontend'
     if (-not $backendReady) { Assert-PortAvailable 8000 }
@@ -50,12 +50,16 @@ try {
                 $needsBuild = @($sourceFiles | Where-Object { $_.LastWriteTimeUtc -gt $built }).Count -gt 0
             }
             if ($needsBuild) {
-                Write-Host 'Building the presentation frontend...'
+                Write-Host 'Building the security assessment frontend...'
                 Push-Location -LiteralPath $frontendDirectory
                 try { & $npmCommand.Source run build; if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed. Check the message above.' } } finally { Pop-Location }
             }
         }
         if (-not $backendReady) {
+            & (Join-Path $ProjectRoot 'scripts\setup-tools.ps1')
+            & $ProjectPython (Join-Path $ProjectRoot 'scripts\check-tools.py')
+            & $ProjectPython -m backend.main
+            if ($LASTEXITCODE -ne 0) { throw 'Database initialization failed.' }
             $backendScript = Join-Path $ProjectRoot 'backend\serve.py'
             $backendProcess = Start-Process -FilePath $ProjectPython -ArgumentList @('"' + $backendScript + '"') -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $ProjectRoot 'data\backend.log') -RedirectStandardError (Join-Path $ProjectRoot 'data\backend-error.log') -PassThru
             Save-ProjectProcess $backendProcess $backendScript 'backend'
@@ -77,3 +81,5 @@ try {
     Write-Host "`nStartup could not finish: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 } finally { Pop-Location }
+
+

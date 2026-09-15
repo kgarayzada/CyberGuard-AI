@@ -1,200 +1,207 @@
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from datetime import datetime, timezone
-import argparse
-import asyncio
-import json
-import sqlite3
-import time
-import uuid
-
-from fastapi import FastAPI, HTTPException
+import argparse, json, sqlite3, uuid, shutil, logging, threading
+from concurrent.futures import ThreadPoolExecutor
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Literal
-from backend.engine import ASSET, FINDINGS, PATHS, STAGES, DISCLAIMER, QUESTIONS, analysis, analyst
+from backend.archive import extract, ArchiveError, MAX_UPLOAD
+from backend.engine import now, security_score, SEVERITIES
+from backend.scanners import availability, run_local, run_osv
 
-ROOT = Path(__file__).resolve().parents[1]
-DB = ROOT / "data" / "cyberguard.db"
+ROOT=Path(__file__).resolve().parents[1]
+DB=ROOT/'data/cyberguard.db'
+WORK=ROOT/'data/workspaces'
+POOL=ThreadPoolExecutor(max_workers=1)
+UPLOAD_LOCK=threading.Lock()
+log=logging.getLogger('cyberguard')
 
 @contextmanager
 def database():
-    conn = sqlite3.connect(DB, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-def now(): return datetime.now(timezone.utc).isoformat()
-def scan_dict(row):
-    s = dict(row)
-    s["findings"] = json.loads(s["findings"])
-    return s
+    c=sqlite3.connect(DB,timeout=20); c.row_factory=sqlite3.Row
+    try: yield c; c.commit()
+    except Exception: c.rollback(); raise
+    finally:c.close()
 
 def initialize():
-    DB.parent.mkdir(exist_ok=True)
+    DB.parent.mkdir(exist_ok=True); WORK.mkdir(exist_ok=True)
     with database() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS scans(id TEXT PRIMARY KEY, date TEXT NOT NULL, status TEXT NOT NULL, score INTEGER, duration INTEGER NOT NULL, progress INTEGER NOT NULL, stage TEXT NOT NULL, started REAL NOT NULL, findings TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS reports(id TEXT PRIMARY KEY, created TEXT NOT NULL, payload TEXT NOT NULL);
-        """)
-        if c.execute("SELECT count(*) FROM assets").fetchone()[0]: return
-        c.execute("INSERT INTO assets VALUES (?,?)", (ASSET["id"], json.dumps(ASSET)))
-        for f in FINDINGS: c.execute("INSERT INTO findings VALUES (?,?)", (f["id"], json.dumps(f)))
-        for day, score, duration in [("2026-08-20",43,193),("2026-08-27",47,181),("2026-09-03",51,172),("2026-09-10",58,167)]:
-            snapshot = json.loads(json.dumps(FINDINGS))
-            if score < 58: snapshot[-1]["status"] = "OPEN"
-            for f in snapshot: f["last_detected"] = day + "T09:00:00Z"
-            c.execute("INSERT INTO scans VALUES (?,?,?,?,?,?,?,?,?)", ("CG-"+day.replace("-", "",1).replace("-", "")[:4]+"-"+day[5:].replace("-", "")+"-001",day+"T09:00:00Z","COMPLETED",score,duration,100,"Complete",0,json.dumps(snapshot)))
+        # Explicit one-time migration removes the obsolete presentation schema/data.
+        if c.execute("SELECT name FROM sqlite_master WHERE name='assets'").fetchone():
+            c.executescript('DROP TABLE IF EXISTS assets; DROP TABLE IF EXISTS findings; DROP TABLE IF EXISTS scans; DROP TABLE IF EXISTS reports;')
+        c.executescript('''CREATE TABLE IF NOT EXISTS assessments(id TEXT PRIMARY KEY,payload TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS findings(id TEXT PRIMARY KEY,assessment_id TEXT NOT NULL,payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS finding_assessment ON findings(assessment_id);
+        CREATE TABLE IF NOT EXISTS scanner_runs(assessment_id TEXT NOT NULL,scanner TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(assessment_id,scanner));''')
 
-def advance_scans():
-    # Persisted timestamps drive a short simulation. No worker queue, no target requests.
-    with database() as c:
-        for row in c.execute("SELECT * FROM scans WHERE status NOT IN ('COMPLETED','FAILED')").fetchall():
-            elapsed = max(0, time.time() - row["started"])
-            progress = min(100, int(elapsed / 6.5 * 100))
-            stage = STAGES[min(9, progress // 10)] if progress < 100 else "Complete"
-            status = "INITIALIZING" if progress < 10 else "RUNNING" if progress < 60 else "ANALYZING" if progress < 100 else "COMPLETED"
-            findings = row["findings"]
-            if progress == 100:
-                snapshot = []
-                for current in c.execute("SELECT payload FROM findings ORDER BY id").fetchall():
-                    f = json.loads(current[0])
-                    f["last_detected"] = row["date"]
-                    c.execute("UPDATE findings SET payload=? WHERE id=?",(json.dumps(f), f["id"]))
-                    snapshot.append(f)
-                findings = json.dumps(snapshot)
-            c.execute("UPDATE scans SET progress=?,stage=?,status=?,score=?,duration=?,findings=? WHERE id=?",(progress,stage,status,58 if progress==100 else None,7 if progress==100 else int(elapsed),findings,row["id"]))
+def save(a):
+    with database() as c:c.execute('INSERT OR REPLACE INTO assessments VALUES (?,?)',(a['id'],json.dumps(a)))
+def get(aid):
+    with database() as c:r=c.execute('SELECT payload FROM assessments WHERE id=?',(aid,)).fetchone()
+    if not r:raise HTTPException(404,'Assessment not found.')
+    return json.loads(r[0])
+def all_assessments():
+    with database() as c: rows=c.execute('SELECT payload FROM assessments ORDER BY rowid DESC').fetchall()
+    return [json.loads(r[0]) for r in rows]
+def findings_for(aid):
+    with database() as c:rows=c.execute('SELECT payload FROM findings WHERE assessment_id=?',(aid,)).fetchall()
+    return sorted([json.loads(r[0]) for r in rows],key=lambda f:(-f['contextual_risk_score'],f['id']))
+def cleanup(aid):
+    target=(WORK/aid).resolve()
+    if target.parent!=WORK.resolve():raise ValueError('Invalid workspace')
+    if target.exists():shutil.rmtree(target)
 
-async def ticker():
-    while True:
-        await asyncio.sleep(.2)
-        await asyncio.to_thread(advance_scans)
+def worker(aid):
+    a=get(aid); results=[]
+    try:
+        for name in ('Semgrep','Gitleaks','OSV dependency analysis'):
+            a['stage']='Running '+name; save(a)
+            run=dict(scanner=name,status='Running',started_at=now(),ended_at=None,version=None,message=None)
+            a['scanner_runs'].append(run);save(a)
+            try:
+                items,status,message,version=run_osv(a,WORK/aid/'source') if name.startswith('OSV') else run_local(name,a,WORK/aid/'source')
+                results.extend(items);run.update(status=status,message=message,version=version,finding_count=len(items))
+            except TimeoutError:
+                run.update(status='Timeout',message=f'{name} exceeded the assessment time limit.',finding_count=0)
+            except Exception as exc:
+                # Never log scanner stdout/stderr, uploaded text or exception bodies (may contain credentials).
+                log.error('Scanner failure assessment=%s scanner=%s type=%s',aid,name,type(exc).__name__)
+                run.update(status='Failed',message=f'{name} could not complete. No results were fabricated for this scanner.',finding_count=0)
+            run['ended_at']=now()
+            with database() as c:c.execute('INSERT OR REPLACE INTO scanner_runs VALUES (?,?,?)',(aid,name,json.dumps(run)))
+            save(a)
+        a['stage']='Normalizing findings and calculating risk';save(a)
+        unique={f['fingerprint']:f for f in results};results=list(unique.values())
+        usable=any(r['status'] in ('Completed','Warning') for r in a['scanner_runs'])
+        a.update(total_findings=len(results),severity_counts={s:sum(f['severity']==s for f in results) for s in SEVERITIES},security_score=security_score(results) if usable else None)
+        a['status']=('Completed' if all(r['status']=='Completed' for r in a['scanner_runs']) else 'Completed with warnings') if usable else 'Failed'
+        a['message']='Results reflect completed scanner coverage only. A high score is not proof of security.' if usable else 'Assessment could not be completed. No findings were fabricated.'
+        with database() as c:
+            for f in results:c.execute('INSERT OR REPLACE INTO findings VALUES (?,?,?)',(f['id'],aid,json.dumps(f)))
+    except Exception as exc:
+        log.error('Assessment failure id=%s type=%s',aid,type(exc).__name__)
+        a.update(status='Failed',message='Assessment could not be completed. No findings were fabricated.')
+    finally:
+        try:cleanup(aid)
+        except OSError:log.error('Workspace cleanup failed for %s',aid);a['message']='Temporary source cleanup failed; use reset to remove retained files.'
+        a['ended_at']=now();a['stage']=a['status'];save(a)
 
 @asynccontextmanager
 async def lifespan(app):
     initialize()
-    advance_scans()
-    task = asyncio.create_task(ticker())
+    for a in all_assessments():
+        if a['status'] in ('Scanning','Uploaded'):
+            a.update(status='Failed',stage='Interrupted',ended_at=now(),message='Interrupted by application restart. Upload the project again.')
+            for run in a['scanner_runs']:
+                if run['status']=='Running':
+                    run.update(status='Interrupted',ended_at=now(),message='Application stopped before this scanner completed.')
+                    with database() as c:c.execute('INSERT OR REPLACE INTO scanner_runs VALUES (?,?,?)',(a['id'],run['scanner'],json.dumps(run)))
+            save(a);cleanup(a['id'])
     yield
-    task.cancel()
-    try: await task
-    except asyncio.CancelledError: pass
+    POOL.shutdown(wait=True)
 
-app = FastAPI(title="CyberGuard AI Local API", lifespan=lifespan, docs_url=None, redoc_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:5173","http://localhost:5173"], allow_methods=["GET","POST","PATCH"], allow_headers=["Content-Type"])
+app=FastAPI(title='CyberGuard Static Assessment',lifespan=lifespan)
+app.add_middleware(CORSMiddleware,allow_origins=['http://127.0.0.1:5173','http://localhost:5173'],allow_methods=['GET','POST','PATCH'],allow_headers=['Content-Type'])
+
+# Bound the entire request before multipart parsing/spooling, including chunked uploads.
+class RequestGuard:
+    def __init__(self,app):self.app=app
+    async def __call__(self,scope,receive,send):
+        if scope['type']!='http':return await self.app(scope,receive,send)
+        headers=dict(scope['headers']);origin=headers.get(b'origin',b'').decode()
+        if scope['method'] not in ('GET','HEAD','OPTIONS') and origin and origin not in ('http://127.0.0.1:5173','http://localhost:5173','http://127.0.0.1:8000'):
+            return await JSONResponse({'detail':'Origin is not allowed.'},403)(scope,receive,send)
+        if scope['method'] in ('POST','PATCH'):
+            chunks=[];size=0;limit=MAX_UPLOAD+65536 if scope['path']=='/api/assessments/upload' else 65536
+            while True:
+                msg=await receive()
+                if msg['type']=='http.disconnect':return
+                size+=len(msg.get('body',b''))
+                if size>limit:return await JSONResponse({'detail':'Upload exceeds the 20 MiB request limit.'},413)(scope,receive,send)
+                chunks.append(msg)
+                if not msg.get('more_body'):break
+            async def replay():
+                return chunks.pop(0) if chunks else await receive()
+            return await self.app(scope,replay,send)
+        await self.app(scope,receive,send)
+app.add_middleware(RequestGuard)
 
 @app.exception_handler(Exception)
-async def graceful_error(request, exc):
-    return JSONResponse(status_code=500, content={"detail":"The local assessment service could not complete this operation. Please retry."})
+async def failure(request,exc):
+    log.error('API failure type=%s',type(exc).__name__)
+    return JSONResponse({'detail':'The local assessment service could not complete this operation.'},500)
+@app.get('/api/health')
+def health():return {'service':'cyberguard-ai','status':'ok','workspace':str(ROOT)}
+@app.get('/api/scanners')
+def scanners():return availability()
+@app.post('/api/assessments/upload',status_code=201)
+def upload(file:UploadFile=File(...),project_name:str=Form(''),environment:Literal['','Development','Testing','Staging','Production']=Form(''),criticality:Literal['','Low','Medium','High','Critical']=Form(''),dependency_lookup:bool=Form(False),authorized:bool=Form(False)):
+    if not authorized:raise HTTPException(422,'Confirm you own or are authorized to assess this source code.')
+    if len(project_name)>120:raise HTTPException(422,'Project name must be 120 characters or fewer.')
+    if not file.filename or not file.filename.lower().endswith('.zip'):raise HTTPException(422,'Only .zip source archives are supported.')
+    if not UPLOAD_LOCK.acquire(blocking=False):raise HTTPException(409,'Another upload is being prepared. Please retry.')
+    aid=uuid.uuid4().hex
+    try:
+        if any(a['status'] in ('Uploaded','Scanning') for a in all_assessments()):raise HTTPException(409,'Finish the active assessment before uploading another project.')
+        container=WORK/aid;container.mkdir();archive=container/'upload.zip';size=0
+        with archive.open('xb') as out:
+            while chunk:=file.file.read(65536):
+                size+=len(chunk)
+                if size>MAX_UPLOAD:raise HTTPException(413,'Upload exceeds the 20 MiB limit.')
+                out.write(chunk)
+        stats=extract(archive,container/'source');archive.unlink()
+        filename=file.filename.replace('\\','/').split('/')[-1]
+        filename=''.join(c for c in filename if c.isprintable())[:160]
+        a=dict(id=aid,project_name=project_name.strip() or filename,uploaded_filename=filename,upload_size=size,uploaded_at=now(),started_at=None,ended_at=None,environment=environment or None,criticality=criticality or None,dependency_lookup=dependency_lookup,status='Uploaded',stage='Archive validated and safely extracted',archive=stats,scanner_runs=[],total_findings=0,severity_counts={},security_score=None,message=None)
+        save(a);return a
+    except ArchiveError as exc:cleanup(aid);raise HTTPException(422,str(exc))
+    except Exception:cleanup(aid);raise
+    finally:UPLOAD_LOCK.release();file.file.close()
+@app.post('/api/assessments/{aid}/start')
+def start(aid:str):
+    with UPLOAD_LOCK:
+        a=get(aid)
+        if a['status']!='Uploaded':raise HTTPException(409,'Only an uploaded assessment can be started.')
+        a.update(status='Scanning',stage='Preparing scanners',started_at=now());save(a);POOL.submit(worker,aid)
+    return a
+@app.get('/api/assessments')
+def assessments():return all_assessments()
+@app.get('/api/assessments/{aid}')
+@app.get('/api/assessments/{aid}/status')
+def assessment(aid:str):return {**get(aid),'findings':findings_for(aid)}
+@app.get('/api/findings')
+def findings(assessment_id:str|None=None):
+    if assessment_id:return findings_for(assessment_id)
+    with database() as c:return [json.loads(r[0]) for r in c.execute('SELECT payload FROM findings')]
+@app.get('/api/findings/{fid}')
+def finding(fid:str):
+    with database() as c:r=c.execute('SELECT payload FROM findings WHERE id=?',(fid,)).fetchone()
+    if not r:raise HTTPException(404,'Finding not found.')
+    return json.loads(r[0])
+class Disposition(BaseModel):status:Literal['OPEN','RESOLVED','ACCEPTED','FALSE POSITIVE']
+@app.patch('/api/findings/{fid}')
+def disposition(fid:str,body:Disposition):
+    f=finding(fid);f['status']=body.status
+    with database() as c:c.execute('UPDATE findings SET payload=? WHERE id=?',(json.dumps(f),fid))
+    return f
+@app.get('/api/dashboard')
+def dashboard():
+    history=all_assessments();completed=[a for a in history if a['status'].startswith('Completed')];latest=completed[0] if completed else None
+    return dict(assessments=history,latest=latest,findings=findings_for(latest['id']) if latest else [],trend=[{'id':a['id'],'project_name':a['project_name'],'date':a['ended_at'],'score':a['security_score']} for a in reversed(completed)])
+@app.get('/api/reports/{aid}')
+def report(aid:str):
+    a=get(aid)
+    if not a['status'].startswith('Completed'):raise HTTPException(409,'A report requires a completed assessment.')
+    fs=findings_for(aid)
+    return dict(assessment=a,findings=fs,generated_at=now(),executive_summary=f"Static assessment identified {len(fs)} findings within the completed scanner coverage. Prioritize the highest contextual risk findings and validate fixes by rescanning. No exploitation or credential validation was performed.")
 
-@app.get("/api/health")
-def health(): return {"service":"cyberguard-ai", "status":"ok", "workspace":str(ROOT)}
-
-def state():
-    advance_scans()
-    with database() as c:
-        asset = json.loads(c.execute("SELECT payload FROM assets").fetchone()[0])
-        findings = [json.loads(r[0]) for r in c.execute("SELECT payload FROM findings ORDER BY id")]
-        scans = [scan_dict(r) for r in c.execute("SELECT * FROM scans ORDER BY started DESC,date DESC")]
-    active = [f for f in findings if f["status"] == "OPEN"]
-    completed = [s for s in scans if s["status"] == "COMPLETED"]
-    paths = [p for p in PATHS if all(any(f["id"]==fid for f in active) for fid in p["findings"])]
-    return {"asset":asset,"findings":findings,"scans":scans,"paths":paths,"questions":QUESTIONS,"disclaimer":DISCLAIMER,"summary":{"score": completed[0]["score"], "previous":completed[1]["score"] if len(completed)>1 else 51,"open":len(active),"resolved":sum(f["status"]=="RESOLVED" for f in findings),"severity":{s:sum(f["severity"]==s for f in active) for s in ["CRITICAL","HIGH","MEDIUM","LOW"]}}}
-
-@app.get("/api/state")
-def get_state(): return state()
-
-@app.post("/api/scans", status_code=201)
-def start_scan():
-    advance_scans()
-    with database() as c:
-        c.execute("BEGIN IMMEDIATE")
-        active = c.execute("SELECT * FROM scans WHERE status NOT IN ('COMPLETED','FAILED') LIMIT 1").fetchone()
-        if active: return scan_dict(active)
-        stamp = now()
-        sid = "CG-"+datetime.now(timezone.utc).strftime("%Y-%m%d")+"-"+uuid.uuid4().hex[:6].upper()
-        c.execute("INSERT INTO scans VALUES (?,?,?,?,?,?,?,?,?)",(sid,stamp,"QUEUED",None,0,0,STAGES[0],time.time(),"[]"))
-        return scan_dict(c.execute("SELECT * FROM scans WHERE id=?",(sid,)).fetchone())
-
-@app.get("/api/scans/{scan_id}")
-def scan(scan_id:str):
-    advance_scans()
-    with database() as c: row = c.execute("SELECT * FROM scans WHERE id=?",(scan_id,)).fetchone()
-    if not row: raise HTTPException(404,"Assessment not found.")
-    return scan_dict(row)
-
-@app.get("/api/findings/{finding_id}")
-def finding(finding_id:str):
-    with database() as c: row = c.execute("SELECT payload FROM findings WHERE id=?",(finding_id,)).fetchone()
-    if not row: raise HTTPException(404,"Finding not found.")
-    f = json.loads(row[0])
-    return {**f,"analysis":analysis(f)}
-
-class Disposition(BaseModel):
-    status: Literal["OPEN","RESOLVED","ACCEPTED","FALSE POSITIVE"]
-
-@app.patch("/api/findings/{finding_id}")
-def update_status(finding_id:str, body:Disposition):
-    with database() as c:
-        row = c.execute("SELECT payload FROM findings WHERE id=?",(finding_id,)).fetchone()
-        if not row: raise HTTPException(404,"Finding not found.")
-        f = json.loads(row[0]); f["status"] = body.status
-        c.execute("UPDATE findings SET payload=? WHERE id=?",(json.dumps(f),finding_id))
-    return {**f,"analysis":analysis(f)}
-
-class Question(BaseModel):
-    question:str
-
-@app.post("/api/analyst")
-def ask(body:Question):
-    if body.question not in QUESTIONS: raise HTTPException(422,"Choose one of the supported analysis questions.")
-    s = state()
-    return {**analyst(body.question,s["findings"],s["summary"]["score"],s["paths"]),"method":"Deterministic local rules · No external AI", "generated":now()}
-
-def report_payload():
-    s = state()
-    s["assessment"] = next(scan for scan in s["scans"] if scan["status"]=="COMPLETED")
-    s["analysis"] = analyst(QUESTIONS[5],s["findings"],s["summary"]["score"],s["paths"])
-    s["priorities"] = analyst(QUESTIONS[4],s["findings"],s["summary"]["score"],s["paths"])
-    s["generated"] = now()
-    return s
-
-@app.get("/api/reports/current")
-def report_current(): return report_payload()
-
-@app.post("/api/reports",status_code=201)
-def generate_report():
-    payload = report_payload()
-    payload["id"] = "CG-RPT-"+uuid.uuid4().hex[:8].upper()
-    with database() as c: c.execute("INSERT INTO reports VALUES (?,?,?)",(payload["id"],payload["generated"],json.dumps(payload)))
-    return payload
-
-@app.get("/api/reports")
-def list_reports():
-    with database() as c: return [dict(r) for r in c.execute("SELECT id,created FROM reports ORDER BY created DESC")]
-
-@app.get("/api/reports/{report_id}")
-def saved_report(report_id:str):
-    with database() as c: row = c.execute("SELECT payload FROM reports WHERE id=?",(report_id,)).fetchone()
-    if not row: raise HTTPException(404,"Report not found.")
-    return json.loads(row[0])
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(); parser.add_argument("--reset",action="store_true"); args=parser.parse_args()
+if __name__=='__main__':
+    parser=argparse.ArgumentParser();parser.add_argument('--reset',action='store_true');args=parser.parse_args()
     if args.reset:
-        # Reset only our known application tables; preserve source and dependencies.
-        initialize()
-        with database() as c:
-            for table in ("reports","scans","findings","assets"): c.execute("DELETE FROM " + table)
-    initialize()
-    print("CyberGuard demo database ready.")
+        for suffix in ('','-wal','-shm','-journal'):Path(str(DB)+suffix).unlink(missing_ok=True)
+        if WORK.exists():
+            for p in WORK.iterdir():
+                if p.is_dir():cleanup(p.name)
+    initialize();print('CyberGuard database ready: no seeded data.')

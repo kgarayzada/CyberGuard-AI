@@ -1,8 +1,5 @@
-export type Section={title:string;body:string};
-export type Finding={id:string;title:string;severity:string;status:string;cwe:string;confidence:number;category:string;resource:string;description:string;evidence:string;technical_impact:string;business_impact:string;remediation:string[];related:string[];path:string|null;cvss:number;asset:string;first_detected:string;last_detected:string;risk:number;factors:{label:string;value:number}[];priority:string;analysis?:Section[]};
-export type Scan={id:string;date:string;status:string;score:number|null;duration:number;progress:number;stage:string;started:number;findings:Finding[]};
-export type Asset={id:string;name:string;url:string;environment:string;exposure:string;type:string;status:string;owner:string;criticality:string};
-export type AttackPath={id:string;title:string;severity:string;score:number;findings:string[];nodes:string[];explanation:string;fix_order:string[]};
-export type State={asset:Asset;findings:Finding[];scans:Scan[];paths:AttackPath[];questions:string[];disclaimer:string;summary:{score:number;previous:number;open:number;resolved:number;severity:Record<string,number>}};
-export type Answer={title:string;intro:string;sections:Section[];method?:string};
-export type Report=State & {id?:string;generated:string;assessment:Scan;analysis:Answer;priorities:Answer};
+﻿export type Finding={id:string;assessment_id:string;scanner:string;scanner_rule_id:string;title:string;description:string;severity:string;category:string;confidence:string|null;cwe:string|null;cve:string|null;package:string|null;vulnerable_version:string|null;fixed_version:string|null;file_path:string|null;start_line:number|null;end_line:number|null;evidence:string;remediation:string;references:string[];fingerprint:string;created_at:string;status:string;contextual_risk_score:number;risk_factors:{label:string;value:number;source:string}[]};
+export type Run={scanner:string;status:string;version:string|null;message:string|null;finding_count?:number;started_at:string;ended_at:string|null};
+export type Assessment={id:string;project_name:string;uploaded_filename:string;uploaded_at:string;started_at:string|null;ended_at:string|null;environment:string|null;criticality:string|null;status:string;stage:string;scanner_runs:Run[];total_findings:number;severity_counts:Record<string,number>;security_score:number|null;message:string|null;findings?:Finding[]};
+export type Dashboard={assessments:Assessment[];latest:Assessment|null;findings:Finding[];trend:{id:string;project_name:string;date:string;score:number}[]};
+export type Report={assessment:Assessment;findings:Finding[];executive_summary:string;generated_at:string};

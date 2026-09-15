@@ -1,0 +1,55 @@
+rules:
+  - id: python-sql-concatenation
+    languages: [python]
+    severity: ERROR
+    message: SQL query constructed with string concatenation may allow injection.
+    pattern: $DB.execute($QUERY + $INPUT, ...)
+    metadata:
+      category: SQL Injection
+      cwe: CWE-89
+      confidence: HIGH
+  - id: python-sql-format
+    languages: [python]
+    severity: ERROR
+    message: Formatted SQL may incorporate untrusted input.
+    pattern: $DB.execute(f"...", ...)
+    metadata:
+      category: SQL Injection
+      cwe: CWE-89
+      confidence: MEDIUM
+  - id: python-weak-md5
+    languages: [python]
+    severity: WARNING
+    message: MD5 is unsuitable for security-sensitive integrity checks.
+    pattern: hashlib.md5(...)
+    metadata:
+      category: Weak Cryptography
+      cwe: CWE-327
+      confidence: HIGH
+  - id: javascript-html-write
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Direct HTML assignment may permit script injection when input is untrusted.
+    pattern: $EL.innerHTML = $INPUT
+    metadata:
+      category: Cross-Site Scripting
+      cwe: CWE-79
+      confidence: MEDIUM
+  - id: python-shell-command
+    languages: [python]
+    severity: ERROR
+    message: Constructing a shell command from expressions risks command injection.
+    pattern: os.system($LEFT + $RIGHT)
+    metadata:
+      category: Command Injection
+      cwe: CWE-78
+      confidence: MEDIUM
+  - id: python-open-concatenation
+    languages: [python]
+    severity: WARNING
+    message: Constructed filesystem paths need containment checks before opening.
+    pattern: open($BASE + $INPUT, ...)
+    metadata:
+      category: Path Traversal
+      cwe: CWE-22
+      confidence: MEDIUM

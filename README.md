@@ -1,103 +1,79 @@
-# CyberGuard AI
+﻿# CyberGuard AI
 
-**Intelligent Vulnerability Assessment & Risk Prioritization Platform**
+**Source Code Security Assessment & Contextual Risk Prioritization Platform**
 
-Security tools often produce fragmented alerts without explaining what to fix first. CyberGuard AI turns findings into understandable priorities, correlated potential attack paths, remediation guidance, and a security assessment report.
+A local React/TypeScript and FastAPI application that accepts ZIP source archives, runs real static scanners, normalizes their results into SQLite, and produces prioritized findings and in-app HTML reports. A fresh database contains zero assessments and zero findings. The project name does not imply generative AI: no external LLM is used.
 
-This is a complete local final-project demonstration. It opens with a fictional banking portal, four completed assessments, a score of **58/100**, **10 open findings** (1 critical, 3 high, 4 medium, 2 low), and one resolved historical finding.
+## Start / stop / reset (Windows PowerShell)
 
-## Start on Windows
-
-From this project directory in PowerShell:
+Prerequisites: an existing Python 3.10+ (64-bit; scanner wheel availability varies), Node.js 22.12+, and npm. No administrator privileges or global installation is required. Python 3.14 and Node 24 were used during development.
 
 ```powershell
 .\start.ps1
-```
-
-- Frontend: **http://127.0.0.1:5173**
-- API health: **http://127.0.0.1:8000/api/health**
-- API schema: **http://127.0.0.1:8000/openapi.json**
-
-Prerequisites: a working **Python 3.10+** runtime (tested with Python 3.14) and **Node.js 22.12+** (tested with Node 24). The script detects the Windows `py` launcher, creates `.venv`, installs local dependencies if missing, builds the frontend if needed, initializes SQLite, starts hidden loopback servers, waits for readiness, and opens your browser. Subsequent presentation startup is offline and reuses installed packages and built assets.
-
-If Windows blocks script execution, use this process-only command; it does not change Windows policy:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
-```
-
-First-time dependency installation needs internet access. Runtime does not. No Administrator rights, global installs, system services, environment changes, external scanners or API keys are used. Use `-NoBrowser` for automated startup. If either required port belongs to another service, startup stops safely and asks you to close that service.
-
-## Reset and stop
-
-```powershell
-.\reset-demo.ps1
 .\stop.ps1
+.\reset-demo.ps1
 ```
 
-Reset stops only processes recorded by this project whose creation time and full script path still match. It clears only the four CyberGuard SQLite tables, reseeds the initial dataset, and restarts the app. Source and dependencies are preserved. Refresh an existing browser tab after reset. Stop preserves all data. Closing the PowerShell window does not stop the hidden servers; use `stop.ps1`.
+Frontend: http://127.0.0.1:5173
+Backend health: http://127.0.0.1:8000/api/health
 
-## Features
+Startup creates/uses `.venv`, installs missing backend and frontend dependencies, builds the UI, initializes SQLite, and attempts scanner setup once. Downloads require internet on first setup. Tools stay in `.venv` or `.tooling`; PATH, registry, services and global runtimes are untouched. Startup does not repeatedly download scanner binaries. To retry provisioning: `.\scripts\setup-tools.ps1 -Retry`. Gitleaks downloads are SHA-256 checked against the publisher's release checksum file. Python wheels are pinned by scanner version; they are not independently signed by this project.
 
-- SOC-style dashboard: severity cards, score trend, category risk, top findings and recent scans.
-- Asset profile with exposure, criticality, ownership and assessment history.
-- A 6.5-second simulated assessment with real persisted scan state, staged progress and immutable finding snapshots. Repeated concurrent starts reuse the active scan.
-- Searchable, filterable findings with evidence, CWE, illustrative CVSS, risk breakdown, technical/business impact and practical remediation.
-- Persisted OPEN, RESOLVED, ACCEPTED and FALSE POSITIVE dispositions; current counts, analyst responses and active paths reflect triage changes.
-- Deterministic local AI-assisted explanations and six focused analyst prompts.
-- Two potential attack paths with linked findings and recommended fix order.
-- In-application HTML security report and locally saved immutable report snapshots. No PDF generation.
-- Responsive layout, keyboard-accessible controls, graceful connection states and local-only assets.
+Reset stops verified project processes, deletes generated database/workspaces and creates an empty database. It preserves the demo ZIP and local tools. Reset leaves services stopped; run start afterward. `-NoBrowser` on start suppresses automatic browser opening.
 
-## Technology and architecture
+## Demo
 
-**React 19 + TypeScript + Vite**, Lucide icons, Recharts, custom responsive CSS; **Python + FastAPI + SQLite** using Python's standard SQLite library. No ORM or migration service is necessary for this small dataset.
+1. Start the application; the dashboard says **No assessments yet**.
+2. Select **UPLOAD SOURCE CODE** and choose `demo/cyberguard-vulnerable-demo.zip`.
+3. Enter **CyberGuard Vulnerable Demo**. Optionally choose Production / High.
+4. Enable OSV lookup if internet access is available, and confirm authorization.
+5. Start the assessment. Watch actual scanner stages and coverage results.
+6. Inspect Findings: scanner, rule, file/line, withheld evidence, risk factors and remediation.
+7. Open the assessment's security report. Stop or reset afterward.
 
-```text
-Browser :5173 → local Node static server / API proxy → FastAPI :8000
-                                                       ↓
-                                                data/cyberguard.db
-                                                       ↕
-                                             deterministic rule engine
-```
+The fixture is intentionally vulnerable, contains only synthetic values, and is never executed. Its editable source is in `demo/source`. No seeded result is attached to it: findings are computed by scanners.
 
-`backend/engine.py` contains fictional fixtures, the risk algorithm, correlation definitions and analyst rules. `backend/main.py` owns initialization, persistence, assessment progress, report snapshots and APIs. `frontend/src/` owns the user interface. The presentation server serves the production build; Vite is needed only for builds or development. `frontend/package-lock.json` and pinned Python requirements preserve dependency versions.
+## Real scanning and coverage
 
-For frontend development: `cd frontend`, then `npm run dev` after stopping the presentation frontend. Keep the backend running. Normal presentations should use `start.ps1`.
+- **Semgrep Community Edition 1.177.0**: local native CLI with six reviewed bundled rules for Python and JavaScript/TypeScript: SQL construction, MD5, direct HTML assignment, constructed file paths and shell commands. This is a deliberately limited pattern set, not the complete Semgrep registry. Rules are in `backend/rules/semgrep.yml`. Metrics and version checking are disabled. Uploaded rule files are not used. [Semgrep documentation](https://semgrep.dev/products/community-edition).
+- **Gitleaks 8.30.0**: directory scan with default secret rules plus a general credential-assignment rule. No credential testing, git history, or recursive archive scanning. Full match/secret strings are discarded and source evidence is withheld before persistence. [Gitleaks documentation](https://github.com/gitleaks/gitleaks).
+- **OSV dependency analysis**: project adapter querying the fixed OSV API for exact versions in `package.json` dependencies/devDependencies and plain `requirements.txt` pins. No install, build, dependency resolution, or registry scripts. Optional internet lookup sends package names/ecosystems/versions only. Ranges, alternate manifests, lockfiles and transitive dependency resolution are outside this MVP's coverage. Unpinned entries are counted as skipped. Advisories are actual OSV responses, never hardcoded. [OSV API](https://google.github.io/osv.dev/post-v1-query/).
 
-## Risk model and interpretation
+Unavailable, failed, timed-out and skipped scanners are visible in assessment history and reports. Partial coverage is **Completed with warnings**. If all scanners fail or are unavailable/skipped, the assessment is **Failed**, with no score. A scanner reporting no findings is different from a scanner that failed. Reports and scores explicitly state their coverage limitations. Unknown advisory severity stays UNKNOWN; CVE, confidence and fixed versions are not invented. Advisory fixed versions may span several release branches; review the advisory before upgrading.
 
-Risk = severity baseline + internet exposure (8) + high business criticality (5) + confidence adjustment (2 or 5) + applicable credential exposure (15), path participation (8), and related-finding correlation (3 for high findings), bounded to 0–100. High baselines vary by finding type. The critical finding sums to **55 + 8 + 5 + 5 + 15 + 8 = 96**. Every factor is displayed on the finding page.
+## Architecture and persistence
 
-The score history (43 → 47 → 51 → 58) is an illustrative benchmark, separate from the finding-level risk algorithm. New simulations reproduce a score of 58; starting another scan does not pretend to fix vulnerabilities. Dispositions update current triage, while past assessment snapshots remain unchanged. Confidence is a fixture classification, not an estimated real-world exploit probability.
+`frontend/src/main.tsx` uses the existing dark/mint component styling and hash navigation. `scripts/serve-frontend.mjs` serves the built frontend and proxies multipart requests on loopback. `backend/main.py` provides upload, start/status, history, dashboard, findings, triage and report APIs. `backend/archive.py` validates/extracts; `backend/scanners.py` invokes and parses scanners; `backend/engine.py` normalizes and scores.
 
-## Demo workflow and presentation guide
+SQLite tables: assessments, scanner_runs, findings (with assessment index). Metadata and normalized results persist across restart. Source workspaces and transient scanner reports are removed after scanning. Interrupted uploads/scans are marked failed on backend restart and their workspaces removed. Reports are generated from persisted assessment results and current triage status; assessment counts/scores remain the original scan snapshot. A new upload is required to rescan.
 
-Overview → Assets → Start Security Scan → Findings → Critical finding → Evidence & risk factors → AI-assisted explanation → Remediation → Attack Paths → AI Analyst → Reports.
+## Deterministic scoring
 
-Follow [the timed 3–5 minute demo guide](docs/demo-guide.md). Reset before presenting. The seeded dates are fixed illustrative historical dates; new assessments use your system's current UTC time and appear first in the recent assessment list.
+Finding contextual risk = sum of the following, clamped to 0–100:
 
-## Verification
+| Factor | Points | Provenance |
+| --- | ---: | --- |
+| Critical / High / Medium / Low / Unknown severity | 75 / 60 / 35 / 15 / 25 | Scanner/advisory |
+| High confidence, if supplied | +5 | Scanner |
+| Credential pattern | +15 | Secret scanner; validity untested |
+| Known vulnerable package version | +5 | OSV response |
+| Production | +3 | Optional user context |
+| Low / Medium / High / Critical business criticality | +0 / +2 / +5 / +8 | Optional user context |
 
-With both services running:
+Security score = round(100 − 0.65 × maximum finding risk − min(35, sum(8 × (risk/100)^2))), clamped to 0–100. No detected findings yields 100 only when some scanner completed. A dominant high-risk issue weighs more than a low-risk issue; accumulated findings add a bounded penalty. Scores are indicators, not probabilities or proof of security. Manual triage does not erase detection history. Trend includes real completed scans with the same project name; different context or coverage can make comparisons misleading.
 
-```powershell
-.\.venv\Scripts\python.exe scripts\verify-api.py
-```
+Fingerprints use scanner, rule, normalized file, line, package and version. Exact duplicates within a scan are merged. Ambiguous cross-scanner overlaps remain separate to avoid merging unrelated issues.
 
-This checks seeded counts, all finding details, exact risk arithmetic, all six analyst questions, concurrent scan deduplication, progress duration, direct SQLite persistence, dispositions, correlation and report snapshot preservation. It creates a scan and report; reset afterward.
+## Upload and process safety
 
-Browser verification uses the optional project-local `playwright-core` package and an existing Chrome or Edge installation. It stores its temporary profile under `.tooling/` and does not install a browser:
+ZIP only: 20 MiB upload, 80 MiB expanded, 4 MiB per file, 2,000 entries, maximum 200:1 expansion ratio, 180-character paths. Stored/deflate compression only. Reject encrypted ZIPs, malformed/empty archives, traversal, absolute paths, backslashes, Windows device names/alternate streams, special files, symlinks, duplicate case-insensitive paths, and unsafe path components. Files extract only to generated IDs in `data/workspaces`. Filenames do not select filesystem destinations. One assessment runs at a time.
 
-```powershell
-node scripts/verify-ui.mjs
-node scripts/capture-screenshots.mjs
-```
+Scanners receive explicit process arguments, trusted local configurations, bounded output and 90-second adapter timeouts. Source text and raw scanner stdout/stderr are never retained in application findings or logs. Evidence is intentionally withheld rather than risking disclosure of secrets missed by a redaction pattern. File paths and dependency metadata remain visible and may themselves be sensitive; this local workspace is for a trusted single user.
 
-The browser checks cover all routes at 1440×900, 1366×768 and 390×844, filters, dispositions, scans, all analyst prompts, reports, connection recovery and external-request detection. Six presentation images are in `docs/screenshots/`. Capture after reset to show the clean initial dashboard; capture itself creates one demo scan. Reset again when finished.
+The application binds loopback only, restricts browser origins and does not authenticate local operating-system users. Do not expose it to a network or use it as a multi-tenant service. Static analyzers parse untrusted files; keep tools updated and use OS isolation for hostile production workloads. Upload limits bound routine resources; this is not an adversarial denial-of-service hardened hosting platform.
 
-## Disclaimer and limitations
+CyberGuard performs static source-code assessment. It does NOT execute uploaded projects. It does NOT prove exploitation. It must only be used on code the user owns or is authorized to assess. It never installs uploaded dependencies, runs build scripts, visits URLs from source, performs port scans, or tests credentials.
 
-CyberGuard AI MVP uses deterministic demonstration assessment data. Findings shown in this demonstration represent a simulated security assessment intended to demonstrate vulnerability management, contextual risk prioritization, correlation, remediation and reporting workflows.
+## QA
 
-`https://portal.fintrust-demo.local` is fictional and is never contacted. `DEMO_API_KEY=CG_DEMO_NOT_REAL_2026` is not a real credential. No exploitation or external AI request occurs. The local analyst uses rules and templates, not an LLM. This MVP has no authentication and is intended only for trusted, single-user loopback demonstration. It does not assess real systems or validate remediation. Reports remain in the application and SQLite; PDF export is deliberately excluded.
+Run `.venv\Scripts\python.exe scripts/verify-api.py` against running services for real uploads, differential scans and invalid archive checks. `node scripts/verify-ui.mjs` exercises the browser with installed Edge and project-local Playwright. QA creates real assessment records; use reset afterward. See `docs/demo-guide.md` and `docs/qa-summary.md` for tested behavior and limitations.
