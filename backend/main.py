@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 import argparse, json, sqlite3, uuid, shutil, logging, threading
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel

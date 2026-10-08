@@ -1,9 +1,10 @@
 """Only trusted scanner configuration and explicit subprocess arguments are used."""
 from pathlib import Path
-import os, sys, json, subprocess, time, threading, urllib.request, re
-from backend.engine import normalize, now
+import os, json, subprocess, time, threading, urllib.request, re
+from backend.engine import normalize
 ROOT = Path(__file__).resolve().parents[1]
 TIMEOUT = 90
+ADVISORY_SEVERITY = {'CRITICAL':'CRITICAL', 'HIGH':'HIGH', 'MODERATE':'MEDIUM', 'MEDIUM':'MEDIUM', 'LOW':'LOW'}
 OUTPUT_LIMIT = 12 * 1024 * 1024
 
 def command(args, cwd, timeout=TIMEOUT):
@@ -97,12 +98,12 @@ def dependencies(workspace):
                 m=re.fullmatch(r'\s*([\w.-]+)==([\w.+-]+)\s*',line)
                 if m: packages.append(('PyPI',m[1],m[2],p.relative_to(workspace).as_posix()))
                 else: skipped+=1
-    if len(packages)>100: raise ValueError('Dependency analysis supports at most 100 exact package versions.')
     return sorted(set(packages)),skipped
 
 def run_osv(assessment,workspace):
     if not assessment['dependency_lookup']: return [],'Skipped','Dependency lookup was not enabled.','OSV API v1'
     packages,skipped=dependencies(workspace)
+    if len(packages)>100: return [],'Warning',f'Dependency analysis covers at most 100 exact package versions; {len(packages)} were found, so no advisories were queried.','OSV API v1'
     findings=[]; deadline=time.monotonic()+TIMEOUT
     # Fixed HTTPS endpoint only. Never use registry URLs or links from uploaded files.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -124,7 +125,7 @@ def run_osv(assessment,workspace):
             for v in data.get('vulns',[]):
                 if v.get('withdrawn'):continue
                 fixed=sorted({e['fixed'] for a in v.get('affected',[]) if a.get('package',{}).get('name')==name for r in a.get('ranges',[]) for e in r.get('events',[]) if 'fixed' in e})
-                sev=v.get('database_specific',{}).get('severity','UNKNOWN')
+                sev=ADVISORY_SEVERITY.get(str(v.get('database_specific',{}).get('severity','')).upper(),'UNKNOWN')
                 cves=[x for x in v.get('aliases',[]) if x.startswith('CVE-')]
                 findings.append(normalize(assessment,'OSV dependency analysis',v['id'],v.get('summary') or v['id'],sev,'Vulnerable Dependency',path,description=v.get('details') or v.get('summary'),cve=', '.join(cves) or None,package=name,vulnerable_version=version,fixed_version=', '.join(fixed) or None,references=['https://osv.dev/vulnerability/'+v['id']]))
             token=data.get('next_page_token')
