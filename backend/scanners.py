@@ -7,6 +7,10 @@ TIMEOUT = 90
 ADVISORY_SEVERITY = {'CRITICAL':'CRITICAL', 'HIGH':'HIGH', 'MODERATE':'MEDIUM', 'MEDIUM':'MEDIUM', 'LOW':'LOW'}
 OUTPUT_LIMIT = 12 * 1024 * 1024
 
+def advisory_severity(value):
+    """Translate an advisory's own severity word. Anything unsupplied stays UNKNOWN."""
+    return ADVISORY_SEVERITY.get(str(value or '').strip().upper(), 'UNKNOWN')
+
 def command(args, cwd, timeout=TIMEOUT):
     env = {**os.environ, 'SEMGREP_SEND_METRICS':'off', 'SEMGREP_ENABLE_VERSION_CHECK':'0', 'SEMGREP_SETTINGS_FILE':str(ROOT/'.tooling/semgrep-settings.yml'), 'OTEL_SDK_DISABLED':'true'}
     for k in ('SEMGREP_APP_TOKEN','GITLEAKS_CONFIG','GITLEAKS_CONFIG_TOML','PYTHONPATH'): env.pop(k,None)
@@ -125,7 +129,7 @@ def run_osv(assessment,workspace):
             for v in data.get('vulns',[]):
                 if v.get('withdrawn'):continue
                 fixed=sorted({e['fixed'] for a in v.get('affected',[]) if a.get('package',{}).get('name')==name for r in a.get('ranges',[]) for e in r.get('events',[]) if 'fixed' in e})
-                sev=ADVISORY_SEVERITY.get(str(v.get('database_specific',{}).get('severity','')).upper(),'UNKNOWN')
+                sev=advisory_severity(v.get('database_specific',{}).get('severity'))
                 cves=[x for x in v.get('aliases',[]) if x.startswith('CVE-')]
                 findings.append(normalize(assessment,'OSV dependency analysis',v['id'],v.get('summary') or v['id'],sev,'Vulnerable Dependency',path,description=v.get('details') or v.get('summary'),cve=', '.join(cves) or None,package=name,vulnerable_version=version,fixed_version=', '.join(fixed) or None,references=['https://osv.dev/vulnerability/'+v['id']]))
             token=data.get('next_page_token')

@@ -1,5 +1,7 @@
 ﻿# CyberGuard AI
 
+[![CI](https://github.com/kgarayzada/CyberGuard-AI/actions/workflows/ci.yml/badge.svg)](https://github.com/kgarayzada/CyberGuard-AI/actions/workflows/ci.yml)
+
 **Source Code Security Assessment & Contextual Risk Prioritization Platform**
 
 A local React/TypeScript and FastAPI application that accepts ZIP source archives, runs real static scanners, normalizes their results into SQLite, and produces prioritized findings and in-app HTML reports. A fresh database contains zero assessments and zero findings. The project name does not imply generative AI: no external LLM is used.
@@ -75,5 +77,7 @@ The application binds loopback only, restricts browser origins and does not auth
 CyberGuard performs static source-code assessment. It does NOT execute uploaded projects. It does NOT prove exploitation. It must only be used on code the user owns or is authorized to assess. It never installs uploaded dependencies, runs build scripts, visits URLs from source, performs port scans, or tests credentials.
 
 ## QA
+
+Run `.venv\Scripts\python.exe -m unittest discover -s scripts -p "test_*.py"` for the offline unit suites: archive validation and extraction limits, deterministic scoring and fingerprinting, evidence redaction, advisory-severity translation, dependency-manifest parsing and subprocess environment scrubbing. They need no scanner binary, database or network, and GitHub Actions runs them with the frontend type-check on every push.
 
 Run `.venv\Scripts\python.exe scripts/verify-api.py` against running services for real uploads, differential scans and invalid archive checks. `node scripts/verify-ui.mjs` exercises the browser with installed Edge and project-local Playwright. QA creates real assessment records; use reset afterward. See `docs/demo-guide.md` and `docs/qa-summary.md` for tested behavior and limitations.

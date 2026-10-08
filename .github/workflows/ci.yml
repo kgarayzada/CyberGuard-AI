@@ -1,0 +1,54 @@
+name: CI
+
+# The application targets Windows (PowerShell entry points, project-local .exe
+# scanners), so the checks run on the same platform the project documents.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend unit tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install backend dependencies
+        run: python -m pip install --disable-pip-version-check --no-cache-dir -r backend/requirements.txt
+
+      # These suites deliberately need no scanner binary, no database and no
+      # network: they cover archive validation, scoring and adapter contracts.
+      - name: Run unit tests
+        run: python -m unittest discover -s scripts -p "test_*.py" --verbose
+
+      - name: Verify the database initialises empty
+        run: python -m backend.main
+
+  frontend:
+    name: Frontend type-check and build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: frontend
+
+      - name: Type-check and build
+        run: npm run build
+        working-directory: frontend
